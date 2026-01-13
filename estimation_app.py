@@ -15,27 +15,26 @@ POSE_PAIRS = [ ["Neck", "RShoulder"], ["Neck", "LShoulder"], ["RShoulder", "RElb
                ["LHip", "LKnee"], ["LKnee", "LAnkle"], ["Neck", "Nose"], ["Nose", "REye"],
                ["REye", "REar"], ["Nose", "LEye"], ["LEye", "LEar"] ]
 
-inWidth = 368
-inHeight = 368
+inWidth, inHeight = 368, 368
 
-# Loading the network using the original TensorFlow method
-net = cv2.dnn.readNetFromTensorflow("graph_opt.pb")
+# Loading the network - using @st.cache_resource to stop "Dosing Out" the CPU
+@st.cache_resource
+def load_net():
+    return cv2.dnn.readNetFromTensorflow("graph_opt.pb")
 
-st.title("Human Pose Estimation OpenCV")
-st.text('Make Sure you have a clear image with all the parts clearly visible')
+net = load_net()
+
+st.title("Human Pose Estimation")
+st.markdown("### Interactive Skeletal Mapping")
 
 # --- SIDEBAR CONTROLS ---
-st.sidebar.title("Select Mode")
-mode = st.sidebar.radio("Input Mode", ("Image Upload", "Webcam Capture"))
-thres = st.sidebar.slider('Threshold for detecting the key points', min_value=0, value=20, max_value=100, step=5)
-thres = thres / 100
+st.sidebar.header("Settings")
+mode = st.sidebar.radio("Choose Input:", ("Upload Image", "Live Webcam Snapshot"))
+thres = st.sidebar.slider('Detection Threshold', 0, 100, 20) / 100
 
 def poseDetector(frame):
-    frameWidth = frame.shape[1]
-    frameHeight = frame.shape[0]
-    
+    frameWidth, frameHeight = frame.shape[1], frame.shape[0]
     net.setInput(cv2.dnn.blobFromImage(frame, 1.0, (inWidth, inHeight), (127.5, 127.5, 127.5), swapRB=True, crop=False))
-    
     out = net.forward()
     out = out[:, :19, :, :]
     
@@ -48,52 +47,30 @@ def poseDetector(frame):
         points.append((int(x), int(y)) if conf > thres else None)
         
     for pair in POSE_PAIRS:
-        partFrom = pair[0]
-        partTo = pair[1]
-        idFrom = BODY_PARTS[partFrom]
-        idTo = BODY_PARTS[partTo]
-
+        partFrom, partTo = pair[0], pair[1]
+        idFrom, idTo = BODY_PARTS[partFrom], BODY_PARTS[partTo]
         if points[idFrom] and points[idTo]:
             cv2.line(frame, points[idFrom], points[idTo], (0, 255, 0), 3)
             cv2.ellipse(frame, points[idFrom], (3, 3), 0, 0, 360, (0, 0, 255), cv2.FILLED)
             cv2.ellipse(frame, points[idTo], (3, 3), 0, 0, 360, (0, 0, 255), cv2.FILLED)
-            
     return frame
 
 # --- MAIN LOGIC ---
-if mode == "Image Upload":
-    img_file_buffer = st.file_uploader("Upload an image", type=["jpg", "jpeg", 'png'])
+source = None
+if mode == "Upload Image":
+    source = st.file_uploader("Upload a clear image", type=["jpg", "jpeg", 'png'])
+else:
+    source = st.camera_input("Take a photo to estimate pose")
 
-    if img_file_buffer is not None:
-        image = np.array(Image.open(img_file_buffer))
-    else:
-        # Fallback to demo image if needed
-        demo_image = 'stand.jpg'
-        image = np.array(Image.open(demo_image))
+if source is not None:
+    # Read the image
+    image = np.array(Image.open(source))
     
-    st.subheader('Original Image')
-    st.image(image, caption="Original Image", use_column_width=True) 
-
-    output = poseDetector(image)
-
-    st.subheader('Positions Estimated')
-    st.image(output, caption="Positions Estimated", use_column_width=True)
-
-elif mode == "Webcam Capture":
-    run = st.checkbox('Start Webcam')
-    FRAME_WINDOW = st.image([])
-    camera = cv2.VideoCapture(0)
-
-    while run:
-        ret, frame = camera.read()
-        if not ret:
-            st.write("Failed to capture video")
-            break
-        
-        # Process and show
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        output = poseDetector(frame)
-        FRAME_WINDOW.image(output)
-    else:
-        st.write('Webcam is OFF')
-        camera.release()
+    # Process
+    st.subheader('Estimated Position')
+    with st.spinner("Analyzing geometry..."):
+        # use_container_width=True fixes the deprecation warning in your logs
+        output = poseDetector(image.copy())
+        st.image(output, use_container_width=True) 
+else:
+    st.info("Please provide an image or take a snapshot to see the AI in action.")
