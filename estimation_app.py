@@ -1,8 +1,7 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
-import cv2
+from PIL import Image
 import numpy as np
-import av
+import cv2
 
 # --- CONFIGURATION ---
 BODY_PARTS = { "Nose": 0, "Neck": 1, "RShoulder": 2, "RElbow": 3, "RWrist": 4,
@@ -18,62 +17,69 @@ POSE_PAIRS = [ ["Neck", "RShoulder"], ["Neck", "LShoulder"], ["RShoulder", "RElb
 
 inWidth, inHeight = 368, 368
 
-# Load the network once
+# Load the network once using @st.cache_resource to optimize memory
 @st.cache_resource
 def load_net():
-    # Ensure graph_opt.pb is in your main directory
     return cv2.dnn.readNetFromTensorflow("graph_opt.pb")
 
 net = load_net()
 
-class PoseProcessor(VideoProcessorBase):
-    def __init__(self):
-        self.thres = 0.2 # Default threshold
+st.title("Human Pose Estimation")
+st.text('Upload a clear image to see the AI map skeletal keypoints.')
 
-    def recv(self, frame):
-        # Convert the frame to a NumPy array (BGR format for OpenCV)
-        img = frame.to_ndarray(format="bgr24")
-        frameWidth, frameHeight = img.shape[1], img.shape[0]
+# --- IMAGE UPLOADER ---
+img_file_buffer = st.file_uploader("Upload an image (JPG, JPEG, PNG)", type=["jpg", "jpeg", 'png'])
 
-        # AI Inference
-        net.setInput(cv2.dnn.blobFromImage(img, 1.0, (inWidth, inHeight), (127.5, 127.5, 127.5), swapRB=True, crop=False))
-        out = net.forward()
-        out = out[:, :19, :, :]
+# Use a demo image if nothing is uploaded
+if img_file_buffer is not None:
+    image = np.array(Image.open(img_file_buffer))
+else:
+    # Ensure you have 'stand.jpg' in your repo or change this to a file you have
+    demo_image = 'stand.jpg' 
+    try:
+        image = np.array(Image.open(demo_image))
+    except FileNotFoundError:
+        st.warning("Please upload an image to begin.")
+        st.stop()
+
+st.subheader('Original Image')
+st.image(image, caption="Original Image", use_container_width=True) 
+
+# Threshold slider for sensitivity
+thres = st.slider('Detection Threshold', 0, 100, 20) / 100
+
+@st.cache_data
+def poseDetector(frame, threshold):
+    frameWidth, frameHeight = frame.shape[1], frame.shape[0]
+    
+    # AI Inference logic
+    net.setInput(cv2.dnn.blobFromImage(frame, 1.0, (inWidth, inHeight), (127.5, 127.5, 127.5), swapRB=True, crop=False))
+    out = net.forward()
+    out = out[:, :19, :, :]
+    
+    points = []
+    for i in range(len(BODY_PARTS)):
+        heatMap = out[0, i, :, :]
+        _, conf, _, point = cv2.minMaxLoc(heatMap)
+        x = (frameWidth * point[0]) / out.shape[3]
+        y = (frameHeight * point[1]) / out.shape[2]
+        points.append((int(x), int(y)) if conf > threshold else None)
         
-        points = []
-        for i in range(len(BODY_PARTS)):
-            heatMap = out[0, i, :, :]
-            _, conf, _, point = cv2.minMaxLoc(heatMap)
-            x = (frameWidth * point[0]) / out.shape[3]
-            y = (frameHeight * point[1]) / out.shape[2]
-            points.append((int(x), int(y)) if conf > self.thres else None)
+    # Draw the skeleton on the frame
+    for pair in POSE_PAIRS:
+        partFrom, partTo = pair[0], pair[1]
+        idFrom, idTo = BODY_PARTS[partFrom], BODY_PARTS[partTo]
+
+        if points[idFrom] and points[idTo]:
+            cv2.line(frame, points[idFrom], points[idTo], (0, 255, 0), 3)
+            cv2.circle(frame, points[idFrom], 3, (0, 0, 255), thickness=-1)
+            cv2.circle(frame, points[idTo], 3, (0, 0, 255), thickness=-1)
             
-        # Draw the Skeleton
-        for pair in POSE_PAIRS:
-            partFrom, partTo = pair[0], pair[1]
-            idFrom, idTo = BODY_PARTS[partFrom], BODY_PARTS[partTo]
+    return frame
 
-            if points[idFrom] and points[idTo]:
-                cv2.line(img, points[idFrom], points[idTo], (0, 255, 0), 3)
-                cv2.ellipse(img, points[idFrom], (3, 3), 0, 0, 360, (0, 0, 255), cv2.FILLED)
-                cv2.ellipse(img, points[idTo], (3, 3), 0, 0, 360, (0, 0, 255), cv2.FILLED)
+# Run detection
+with st.spinner("Analyzing pose..."):
+    output = poseDetector(image.copy(), thres)
 
-        # Return the processed frame back to the live stream
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
-
-st.title("👤 Live Human Pose Estimator")
-st.write("Real-time skeletal mapping via WebRTC.")
-
-# Launch the streamer
-ctx = webrtc_streamer(
-    key="pose-estimation",
-    video_processor_factory=PoseProcessor,
-    rtc_configuration={ # This config helps bypass common firewall issues
-        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-    },
-    media_stream_constraints={"video": True, "audio": False},
-)
-
-# Allow users to adjust threshold live
-if ctx.video_processor:
-    ctx.video_processor.thres = st.slider("Detection Sensitivity", 0.0, 1.0, 0.2, 0.05)
+st.subheader('Positions Estimated')
+st.image(output, caption="Skeletal Mapping Result", use_container_width=True)
