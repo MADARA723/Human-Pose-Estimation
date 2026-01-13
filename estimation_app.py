@@ -1,7 +1,8 @@
 import streamlit as st
-from PIL import Image
-import numpy as np
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 import cv2
+import numpy as np
+import av
 
 # --- CONFIGURATION ---
 BODY_PARTS = { "Nose": 0, "Neck": 1, "RShoulder": 2, "RElbow": 3, "RWrist": 4,
@@ -17,60 +18,62 @@ POSE_PAIRS = [ ["Neck", "RShoulder"], ["Neck", "LShoulder"], ["RShoulder", "RElb
 
 inWidth, inHeight = 368, 368
 
-# Loading the network - using @st.cache_resource to stop "Dosing Out" the CPU
+# Load the network once
 @st.cache_resource
 def load_net():
+    # Ensure graph_opt.pb is in your main directory
     return cv2.dnn.readNetFromTensorflow("graph_opt.pb")
 
 net = load_net()
 
-st.title("Human Pose Estimation")
-st.markdown("### Interactive Skeletal Mapping")
+class PoseProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.thres = 0.2 # Default threshold
 
-# --- SIDEBAR CONTROLS ---
-st.sidebar.header("Settings")
-mode = st.sidebar.radio("Choose Input:", ("Upload Image", "Live Webcam Snapshot"))
-thres = st.sidebar.slider('Detection Threshold', 0, 100, 20) / 100
+    def recv(self, frame):
+        # Convert the frame to a NumPy array (BGR format for OpenCV)
+        img = frame.to_ndarray(format="bgr24")
+        frameWidth, frameHeight = img.shape[1], img.shape[0]
 
-def poseDetector(frame):
-    frameWidth, frameHeight = frame.shape[1], frame.shape[0]
-    net.setInput(cv2.dnn.blobFromImage(frame, 1.0, (inWidth, inHeight), (127.5, 127.5, 127.5), swapRB=True, crop=False))
-    out = net.forward()
-    out = out[:, :19, :, :]
-    
-    points = []
-    for i in range(len(BODY_PARTS)):
-        heatMap = out[0, i, :, :]
-        _, conf, _, point = cv2.minMaxLoc(heatMap)
-        x = (frameWidth * point[0]) / out.shape[3]
-        y = (frameHeight * point[1]) / out.shape[2]
-        points.append((int(x), int(y)) if conf > thres else None)
+        # AI Inference
+        net.setInput(cv2.dnn.blobFromImage(img, 1.0, (inWidth, inHeight), (127.5, 127.5, 127.5), swapRB=True, crop=False))
+        out = net.forward()
+        out = out[:, :19, :, :]
         
-    for pair in POSE_PAIRS:
-        partFrom, partTo = pair[0], pair[1]
-        idFrom, idTo = BODY_PARTS[partFrom], BODY_PARTS[partTo]
-        if points[idFrom] and points[idTo]:
-            cv2.line(frame, points[idFrom], points[idTo], (0, 255, 0), 3)
-            cv2.ellipse(frame, points[idFrom], (3, 3), 0, 0, 360, (0, 0, 255), cv2.FILLED)
-            cv2.ellipse(frame, points[idTo], (3, 3), 0, 0, 360, (0, 0, 255), cv2.FILLED)
-    return frame
+        points = []
+        for i in range(len(BODY_PARTS)):
+            heatMap = out[0, i, :, :]
+            _, conf, _, point = cv2.minMaxLoc(heatMap)
+            x = (frameWidth * point[0]) / out.shape[3]
+            y = (frameHeight * point[1]) / out.shape[2]
+            points.append((int(x), int(y)) if conf > self.thres else None)
+            
+        # Draw the Skeleton
+        for pair in POSE_PAIRS:
+            partFrom, partTo = pair[0], pair[1]
+            idFrom, idTo = BODY_PARTS[partFrom], BODY_PARTS[partTo]
 
-# --- MAIN LOGIC ---
-source = None
-if mode == "Upload Image":
-    source = st.file_uploader("Upload a clear image", type=["jpg", "jpeg", 'png'])
-else:
-    source = st.camera_input("Take a photo to estimate pose")
+            if points[idFrom] and points[idTo]:
+                cv2.line(img, points[idFrom], points[idTo], (0, 255, 0), 3)
+                cv2.ellipse(img, points[idFrom], (3, 3), 0, 0, 360, (0, 0, 255), cv2.FILLED)
+                cv2.ellipse(img, points[idTo], (3, 3), 0, 0, 360, (0, 0, 255), cv2.FILLED)
 
-if source is not None:
-    # Read the image
-    image = np.array(Image.open(source))
-    
-    # Process
-    st.subheader('Estimated Position')
-    with st.spinner("Analyzing geometry..."):
-        # use_container_width=True fixes the deprecation warning in your logs
-        output = poseDetector(image.copy())
-        st.image(output, use_container_width=True) 
-else:
-    st.info("Please provide an image or take a snapshot to see the AI in action.")
+        # Return the processed frame back to the live stream
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+st.title("👤 Live Human Pose Estimator")
+st.write("Real-time skeletal mapping via WebRTC.")
+
+# Launch the streamer
+ctx = webrtc_streamer(
+    key="pose-estimation",
+    video_processor_factory=PoseProcessor,
+    rtc_configuration={ # This config helps bypass common firewall issues
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+    },
+    media_stream_constraints={"video": True, "audio": False},
+)
+
+# Allow users to adjust threshold live
+if ctx.video_processor:
+    ctx.video_processor.thres = st.slider("Detection Sensitivity", 0.0, 1.0, 0.2, 0.05)
